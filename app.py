@@ -75,7 +75,7 @@ menu = st.sidebar.radio(
     ["📁 知识库", "💬 智能问答", "💬 对话模拟", "📄 合同工具", "📊 数据分析", "⚙️ 管理"]
 )
 
-# ================== 知识库页面 ==================
+# ================== 知识库页面（不变） ==================
 if menu == "📁 知识库":
     st.header("📁 知识库浏览")
     if not selected_space:
@@ -162,14 +162,13 @@ if menu == "📁 知识库":
                     del st.session_state['view_file_id']
                     st.rerun()
 
-# ================== 智能问答（完全隔离的记忆） ==================
+# ================== 智能问答（已支持跨空间） ==================
 elif menu == "💬 智能问答":
     st.header("💬 知识问答")
     if not selected_space:
         st.warning("请先选择一个工作空间")
         st.stop()
 
-    # 搜索范围下拉框
     all_spaces = get_spaces()
     space_options = {"全部知识库（跨空间）": "all"}
     for sp in all_spaces:
@@ -181,7 +180,6 @@ elif menu == "💬 智能问答":
     )
     scope_value = space_options[selected_scope_label]
 
-    # 生成唯一记忆键（scope_key）
     if scope_value == "all":
         search_space_ids = [s.id for s in all_spaces]
         scope_key = "scope_all"
@@ -189,7 +187,6 @@ elif menu == "💬 智能问答":
         search_space_ids = [scope_value]
         scope_key = f"scope_space_{scope_value}"
 
-    # ---------- 管理隔离记忆 ----------
     if "qa_memories" not in st.session_state:
         st.session_state.qa_memories = {}
     if scope_key not in st.session_state.qa_memories:
@@ -206,15 +203,12 @@ elif menu == "💬 智能问答":
         st.session_state.qa_memories[scope_key] = memory
     qa_mem = st.session_state.qa_memories[scope_key]
 
-    # 显示当前记忆中的历史对话
     for msg in qa_mem.chat_memory.messages:
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         elif msg.type == "ai":
             st.chat_message("assistant").write(msg.content)
 
-    # 正在进行的流式任务（按范围隔离任务：仅在范围未变时复用）
-    # 获取当前任务，但若范围变化则废弃之前的任务
     if "task_scope" not in st.session_state:
         st.session_state.task_scope = None
     if st.session_state.task_scope != scope_key:
@@ -229,13 +223,11 @@ elif menu == "💬 智能问答":
                 st_autorefresh(interval=1000, limit=None, key="qa_auto")
                 placeholder.markdown(task["state"]["tokens"] + "▌")
         else:
-            # 任务完成，清除状态
             st.session_state.task = None
             st.rerun()
     else:
         user_question = st.chat_input("请输入你的问题")
         if user_question:
-            # 将用户问题存入记忆
             qa_mem.chat_memory.add_user_message(user_question)
             state = {"tokens": "", "done": False}
             thread = threading.Thread(
@@ -251,37 +243,55 @@ elif menu == "💬 智能问答":
             st.session_state.task_scope = scope_key
             st.rerun()
 
-    # 清空按钮（仅清空当前范围记忆）
     if st.button("清空对话历史"):
         qa_mem.clear()
         st.session_state.task = None
         st.rerun()
 
-# ================== 对话模拟 ==================
+# ================== 对话模拟（修复 Prompt 杜绝编造） ==================
 elif menu == "💬 对话模拟":
     st.header("💬 用户对话模拟")
     if not selected_space:
         st.warning("请先选择一个工作空间")
         st.stop()
 
-    # 对话模拟记忆基于当前工作空间
-    if "sim_memory" not in st.session_state:
+    all_spaces = get_spaces()
+    space_options_sim = {"全部工作空间": "all"}
+    for sp in all_spaces:
+        space_options_sim[sp.name] = sp.id
+    selected_scope_label_sim = st.selectbox(
+        "限定搜索范围",
+        list(space_options_sim.keys()),
+        key="sim_scope"
+    )
+    scope_value_sim = space_options_sim[selected_scope_label_sim]
+
+    if scope_value_sim == "all":
+        sim_search_ids = [s.id for s in all_spaces]
+        scope_key_sim = "sim_scope_all"
+    else:
+        sim_search_ids = [scope_value_sim]
+        scope_key_sim = f"sim_scope_{scope_value_sim}"
+
+    if "sim_memories" not in st.session_state:
+        st.session_state.sim_memories = {}
+    if scope_key_sim not in st.session_state.sim_memories:
         from langchain.memory import ConversationBufferMemory
         from langchain.memory.chat_message_histories import FileChatMessageHistory
-        sim_history_path = os.path.join(HISTORY_DIR, f"sim_space_{selected_space.id}.json")
-        sim_history = FileChatMessageHistory(sim_history_path)
-        st.session_state.sim_memory = ConversationBufferMemory(
+        sim_path = os.path.join(HISTORY_DIR, f"sim_{scope_key_sim}.json")
+        sim_hist = FileChatMessageHistory(sim_path)
+        st.session_state.sim_memories[scope_key_sim] = ConversationBufferMemory(
             memory_key="chat_history",
-            chat_memory=sim_history,
+            chat_memory=sim_hist,
             return_messages=True
         )
-    sim_mem = st.session_state.sim_memory
+    sim_mem = st.session_state.sim_memories[scope_key_sim]
 
     tab1, tab2, tab3 = st.tabs(["📞 模拟对话", "🔍 历史搜索", "📊 高频问题"])
 
     with tab1:
         st.subheader("输入客户问题，生成真人化回答")
-        st.markdown("**搜索范围：当前工作空间**")
+        st.caption(f"当前搜索范围：{selected_scope_label_sim}")
 
         with st.form("sim_form", clear_on_submit=True):
             customer_question = st.text_area("客户问题", height=100, key="sim_input")
@@ -293,25 +303,34 @@ elif menu == "💬 对话模拟":
                 from langchain.prompts import ChatPromptTemplate
                 from config import LLM_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 
-                vectordb = get_vectorstore(selected_space.id)
-                retriever = vectordb.as_retriever(search_kwargs={"k": 4})
-                docs = retriever.get_relevant_documents(customer_question)
-                context = "\n\n".join([d.page_content for d in docs])
+                all_docs = []
+                for sid in sim_search_ids:
+                    vectordb = get_vectorstore(sid)
+                    retriever = vectordb.as_retriever(search_kwargs={"k": 4})
+                    docs = retriever.get_relevant_documents(customer_question)
+                    all_docs.extend(docs)
+                seen = set()
+                unique_docs = []
+                for d in all_docs:
+                    if d.page_content not in seen:
+                        seen.add(d.page_content)
+                        unique_docs.append(d)
+                unique_docs = unique_docs[:4]
+                context = "\n\n".join([d.page_content for d in unique_docs])
 
+                # === 修复后的 Prompt，强制基于文档且禁止编造 ===
                 prompt = ChatPromptTemplate.from_messages([
-                    ("system", """你是一位经验丰富、富有同理心的资深产品顾问，根据公司产品知识库，以真实人类的沟通方式回答客户问题。
-**核心要求：**
-1. **情绪共鸣**：先理解客户情绪，用温暖、真诚的语言回应。
-2. **思维过程展现**：像人一样“想一想再说”，例如“让我帮您梳理一下...”。
-3. **口语化但不失专业**：用词自然，像朋友聊天。
-4. **结构化回答**：用“首先...其次...最后”等口语化结构。
-5. **主动提供额外价值**：补充小建议或常见误区。
-6. **诚实与边界**：不知则说明，建议联系人工。
+                    ("system", """你是一位专业、严谨的企业顾问。你必须**严格、仅、完全**根据下面提供的【背景知识库】回答客户问题。
+
+**重要规则（违反将导致系统不可用）：**
+1. 如果背景知识库中**没有**任何内容能直接或间接回答客户问题，你必须说：“抱歉，目前的知识库中未包含该信息，我无法为您提供答案，建议联系相关同事。”
+2. 如果背景知识库中**只有部分信息**，你可以基于这些信息谨慎回答，但**绝不能**添加任何知识库中没有的细节、产品名、服务描述、价格等。
+3. 你的回答必须像真人沟通，语气温和专业，但**所有事实性内容必须来自背景知识库**。
+4. 绝对禁止编造任何信息，即使你认为那是常识。如果知识库未提及，那就是不存在。
+5. 如果客户的问题非常模糊（例如“你们公司做什么的”），而知识库中没有公司简介，你必须如实告知。
 
 背景知识库：
-{context}
-
-对话历史（注意保持连贯）："""),
+{context}"""),
                     *sim_mem.chat_memory.messages,
                     ("human", "{question}")
                 ])
@@ -395,7 +414,7 @@ elif menu == "💬 对话模拟":
         else:
             st.info("暂无模拟对话记录。")
 
-# ================== 合同工具 ==================
+# ================== 合同工具（不变） ==================
 elif menu == "📄 合同工具":
     st.header("📄 合同工具")
     if not selected_space:
@@ -403,12 +422,23 @@ elif menu == "📄 合同工具":
         st.stop()
 
     sub_tab1, sub_tab2, sub_tab3 = st.tabs(["合同解析", "风险审查", "合同对比"])
+
     with sub_tab1:
         st.subheader("从知识库文件解析合同")
-        files = get_files_by_space(selected_space.id)
+        all_spaces = get_spaces()
+        space_choices_contract = {sp.name: sp.id for sp in all_spaces}
+        selected_contract_space_name = st.selectbox(
+            "选择文件所在空间",
+            list(space_choices_contract.keys()),
+            index=list(space_choices_contract.keys()).index(
+                next((s.name for s in all_spaces if s.id == selected_space.id), list(space_choices_contract.keys())[0])
+            )
+        )
+        selected_contract_space_id = space_choices_contract[selected_contract_space_name]
+        files = get_files_by_space(selected_contract_space_id)
         file_options = [f"{f.id}: {f.title}" for f in files]
         if not file_options:
-            st.info("请先在知识库上传合同文件")
+            st.info("该空间暂无文件，请先在知识库上传合同文件")
         else:
             selected_file_str = st.selectbox("选择文件", file_options)
             file_id = int(selected_file_str.split(":")[0])
@@ -561,12 +591,22 @@ elif menu == "⚙️ 管理":
 
     with sub_b:
         st.subheader("文档敏感信息检测")
-        files = get_files_by_space(selected_space.id) if selected_space else []
-        if not files:
-            st.info("请先在工作空间上传文件")
-        else:
-            mode = st.radio("检测范围", ["选择文件", "全库扫描"])
-            if mode == "选择文件":
+        mode = st.radio("检测范围", ["选择文件", "全库扫描"])
+        if mode == "选择文件":
+            all_spaces = get_spaces()
+            space_choices = {sp.name: sp.id for sp in all_spaces}
+            detect_space_name = st.selectbox(
+                "选择文件所在空间",
+                list(space_choices.keys()),
+                index=list(space_choices.keys()).index(
+                    next((s.name for s in all_spaces if s.id == selected_space.id), list(space_choices.keys())[0])
+                )
+            )
+            detect_space_id = space_choices[detect_space_name]
+            files = get_files_by_space(detect_space_id)
+            if not files:
+                st.info("该空间暂无文件")
+            else:
                 selected_file = st.selectbox("选择文件", [f"{f.id}: {f.title}" for f in files])
                 file_id = int(selected_file.split(":")[0])
                 if st.button("开始检测"):
@@ -581,22 +621,22 @@ elif menu == "⚙️ 管理":
                             st.table(findings)
                         else:
                             st.success("未发现常见敏感信息。")
-            else:
-                if st.button("扫描所有合同"):
-                    all_findings = []
-                    contracts = get_all_contracts()
-                    for c in contracts:
-                        if c.full_text:
-                            found = detect_sensitive(c.full_text)
-                            for f in found:
-                                f["合同ID"] = c.id
-                                f["文件名"] = c.project_name or ""
-                            all_findings.extend(found)
-                    if all_findings:
-                        st.error(f"在 {len(contracts)} 份合同中发现敏感信息")
-                        st.dataframe(pd.DataFrame(all_findings))
-                    else:
-                        st.success("所有合同均未发现常见敏感信息。")
+        else:
+            if st.button("扫描所有合同"):
+                all_findings = []
+                contracts = get_all_contracts()
+                for c in contracts:
+                    if c.full_text:
+                        found = detect_sensitive(c.full_text)
+                        for f in found:
+                            f["合同ID"] = c.id
+                            f["文件名"] = c.project_name or ""
+                        all_findings.extend(found)
+                if all_findings:
+                    st.error(f"在 {len(contracts)} 份合同中发现敏感信息")
+                    st.dataframe(pd.DataFrame(all_findings))
+                else:
+                    st.success("所有合同均未发现常见敏感信息。")
 
     with sub_c:
         st.subheader("全局标签管理")
