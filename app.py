@@ -13,24 +13,23 @@ from db.repository import (
     save_sim_history, search_sim_histories, get_frequent_questions,
     update_contract_risk_report
 )
-from chains.qa_chain import get_memory, load_history, background_generate
+from chains.qa_chain import background_generate
 from chains.extraction_chain import extract_contract_info
 from chains.risk_chain import analyze_risks
-from chains.auto_classifier import suggest_category_and_tags
 from ingest.document_loader import load_and_split_path, load_and_split_bytes
-from ingest.vector_store import get_vectorstore, delete_from_store, add_documents_to_store
+from ingest.vector_store import get_vectorstore
 from analytics.viz import (
     load_contracts_df, plot_amount_distribution, plot_monthly_trend,
     plot_party_pie, get_expiring_contracts
 )
 from utils.sensitive_detect import detect_sensitive
 from utils.contract_compare import compare_contracts
-from config import REMIND_DAYS, UPLOAD_DIR
+from config import REMIND_DAYS, UPLOAD_DIR, HISTORY_DIR
 
 st.set_page_config(page_title="企业知识库 AI 助手", layout="wide")
 st.title("📚 企业知识库智能助手")
 
-# --- 初始化工作空间 ---
+# ---------------- 初始化工作空间 ----------------
 if "current_space_id" not in st.session_state:
     spaces = get_spaces()
     if spaces:
@@ -40,10 +39,8 @@ if "current_space_id" not in st.session_state:
         st.session_state.current_space_id = s.id
 if "task" not in st.session_state:
     st.session_state.task = None
-if "qa_memory" not in st.session_state:
-    st.session_state.qa_memory = None
 
-# --- 侧边栏：空间与类别管理 ---
+# ---------------- 侧边栏：空间管理 ----------------
 st.sidebar.title("🏢 工作空间")
 spaces = get_spaces()
 space_names = [s.name for s in spaces]
@@ -72,27 +69,7 @@ with st.sidebar.expander("管理空间"):
         st.session_state.current_space_id = None
         st.rerun()
 
-st.sidebar.divider()
-st.sidebar.title("📂 知识类别")
-if selected_space:
-    categories = get_categories(selected_space.id)
-    cat_names = [c.name for c in categories]
-    with st.sidebar.expander("管理类别"):
-        with st.form("new_cat_form"):
-            new_cat_name = st.text_input("类别名称")
-            new_cat_desc = st.text_input("描述")
-            if st.form_submit_button("添加"):
-                create_category(selected_space.id, new_cat_name, new_cat_desc)
-                st.rerun()
-        if categories:
-            cat_to_del = st.selectbox("删除类别", cat_names)
-            if st.button("删除选定类别"):
-                cat_obj = next((c for c in categories if c.name == cat_to_del), None)
-                if cat_obj:
-                    delete_category(cat_obj.id)
-                    st.rerun()
-
-# --- 功能导航 ---
+# ---------------- 功能导航 ----------------
 menu = st.sidebar.radio(
     "功能导航",
     ["📁 知识库", "💬 智能问答", "💬 对话模拟", "📄 合同工具", "📊 数据分析", "⚙️ 管理"]
@@ -113,15 +90,8 @@ if menu == "📁 知识库":
             with st.expander("文档属性（可选）"):
                 title = st.text_input("标题", value=uploaded_file.name.rsplit(".", 1)[0])
                 description = st.text_area("描述")
-                categories = get_categories(selected_space.id)
-                cat_options = {"不指定（自动推荐）": None}
-                for c in categories:
-                    cat_options[c.name] = c.id
-                selected_cat = st.selectbox("类别", list(cat_options.keys()))
-                cat_id = cat_options[selected_cat]
                 tags_str = st.text_input("标签（逗号分隔）")
                 manual_tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
-                auto_suggest = st.checkbox("启用AI自动推荐类别和标签", value=(cat_id is None))
 
             if st.button("确认上传"):
                 with st.spinner("上传并分析中..."):
@@ -132,25 +102,20 @@ if menu == "📁 知识库":
                         filename=uploaded_file.name,
                         title=title,
                         description=description,
-                        category_id=cat_id,
+                        category_id=None,
                         tags=manual_tags,
-                        auto_suggest=auto_suggest
+                        auto_suggest=False
                     )
                 st.success(f"文档 '{file_record.title}' 上传成功！")
                 st.rerun()
 
     with col2:
         st.subheader("筛选与搜索")
-        categories = get_categories(selected_space.id)
-        cat_filter_options = {"全部": None}
-        for c in categories:
-            cat_filter_options[c.name] = c.id
-        selected_filter_cat = st.selectbox("按类别筛选", list(cat_filter_options.keys()))
         all_tags = get_all_tags()
         tag_filter_options = ["全部"] + [t.name for t in all_tags]
         selected_filter_tag = st.selectbox("按标签筛选", tag_filter_options)
 
-    files = get_files_by_space(selected_space.id, category_id=cat_filter_options[selected_filter_cat])
+    files = get_files_by_space(selected_space.id)
     if selected_filter_tag != "全部":
         files = [f for f in files if hasattr(f, 'tags') and any(t.name == selected_filter_tag for t in f.tags)]
 
@@ -197,31 +162,64 @@ if menu == "📁 知识库":
                     del st.session_state['view_file_id']
                     st.rerun()
 
-# ================== 智能问答 ==================
+# ================== 智能问答（完全隔离的记忆） ==================
 elif menu == "💬 智能问答":
     st.header("💬 知识问答")
     if not selected_space:
         st.warning("请先选择一个工作空间")
         st.stop()
 
-    if st.session_state.qa_memory is None or st.session_state.get('qa_space_id') != selected_space.id:
-        st.session_state.qa_memory = get_memory(selected_space.id)
-        st.session_state.qa_space_id = selected_space.id
-    mem = st.session_state.qa_memory
+    # 搜索范围下拉框
+    all_spaces = get_spaces()
+    space_options = {"全部知识库（跨空间）": "all"}
+    for sp in all_spaces:
+        space_options[sp.name] = sp.id
+    selected_scope_label = st.selectbox(
+        "限定搜索范围",
+        list(space_options.keys()),
+        key="qa_scope"
+    )
+    scope_value = space_options[selected_scope_label]
 
-    categories = get_categories(selected_space.id)
-    cat_choice = {"全部知识库": None}
-    for c in categories:
-        cat_choice[c.name] = c.id
-    selected_cat = st.selectbox("限定搜索范围", list(cat_choice.keys()))
-    cat_id = cat_choice[selected_cat]
+    # 生成唯一记忆键（scope_key）
+    if scope_value == "all":
+        search_space_ids = [s.id for s in all_spaces]
+        scope_key = "scope_all"
+    else:
+        search_space_ids = [scope_value]
+        scope_key = f"scope_space_{scope_value}"
 
-    history = load_history(selected_space.id)
-    for msg in history:
+    # ---------- 管理隔离记忆 ----------
+    if "qa_memories" not in st.session_state:
+        st.session_state.qa_memories = {}
+    if scope_key not in st.session_state.qa_memories:
+        from langchain.memory import ConversationBufferMemory
+        from langchain.memory.chat_message_histories import FileChatMessageHistory
+        history_path = os.path.join(HISTORY_DIR, f"qa_{scope_key}.json")
+        history = FileChatMessageHistory(history_path)
+        memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            chat_memory=history,
+            return_messages=True,
+            output_key="result"
+        )
+        st.session_state.qa_memories[scope_key] = memory
+    qa_mem = st.session_state.qa_memories[scope_key]
+
+    # 显示当前记忆中的历史对话
+    for msg in qa_mem.chat_memory.messages:
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         elif msg.type == "ai":
             st.chat_message("assistant").write(msg.content)
+
+    # 正在进行的流式任务（按范围隔离任务：仅在范围未变时复用）
+    # 获取当前任务，但若范围变化则废弃之前的任务
+    if "task_scope" not in st.session_state:
+        st.session_state.task_scope = None
+    if st.session_state.task_scope != scope_key:
+        st.session_state.task = None
+        st.session_state.task_scope = scope_key
 
     task = st.session_state.task
     if task is not None:
@@ -231,16 +229,18 @@ elif menu == "💬 智能问答":
                 st_autorefresh(interval=1000, limit=None, key="qa_auto")
                 placeholder.markdown(task["state"]["tokens"] + "▌")
         else:
+            # 任务完成，清除状态
             st.session_state.task = None
             st.rerun()
     else:
         user_question = st.chat_input("请输入你的问题")
         if user_question:
-            mem.chat_memory.add_user_message(user_question)
+            # 将用户问题存入记忆
+            qa_mem.chat_memory.add_user_message(user_question)
             state = {"tokens": "", "done": False}
             thread = threading.Thread(
                 target=background_generate,
-                args=(user_question, selected_space.id, cat_id, mem, state)
+                args=(user_question, search_space_ids, qa_mem, state)
             )
             thread.start()
             st.session_state.task = {
@@ -248,10 +248,12 @@ elif menu == "💬 智能问答":
                 "state": state,
                 "thread": thread
             }
+            st.session_state.task_scope = scope_key
             st.rerun()
 
+    # 清空按钮（仅清空当前范围记忆）
     if st.button("清空对话历史"):
-        mem.clear()
+        qa_mem.clear()
         st.session_state.task = None
         st.rerun()
 
@@ -262,22 +264,24 @@ elif menu == "💬 对话模拟":
         st.warning("请先选择一个工作空间")
         st.stop()
 
+    # 对话模拟记忆基于当前工作空间
+    if "sim_memory" not in st.session_state:
+        from langchain.memory import ConversationBufferMemory
+        from langchain.memory.chat_message_histories import FileChatMessageHistory
+        sim_history_path = os.path.join(HISTORY_DIR, f"sim_space_{selected_space.id}.json")
+        sim_history = FileChatMessageHistory(sim_history_path)
+        st.session_state.sim_memory = ConversationBufferMemory(
+            memory_key="chat_history",
+            chat_memory=sim_history,
+            return_messages=True
+        )
+    sim_mem = st.session_state.sim_memory
+
     tab1, tab2, tab3 = st.tabs(["📞 模拟对话", "🔍 历史搜索", "📊 高频问题"])
 
     with tab1:
         st.subheader("输入客户问题，生成真人化回答")
-
-        if "sim_memory" not in st.session_state:
-            from langchain.memory import ConversationBufferMemory
-            st.session_state.sim_memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-        sim_mem = st.session_state.sim_memory
-
-        categories = get_categories(selected_space.id)
-        cat_choice = {"全部知识库": None}
-        for c in categories:
-            cat_choice[c.name] = c.id
-        selected_cat_name = st.selectbox("限定产品范围", list(cat_choice.keys()), key="sim_cat")
-        cat_id = cat_choice[selected_cat_name]
+        st.markdown("**搜索范围：当前工作空间**")
 
         with st.form("sim_form", clear_on_submit=True):
             customer_question = st.text_area("客户问题", height=100, key="sim_input")
@@ -289,7 +293,7 @@ elif menu == "💬 对话模拟":
                 from langchain.prompts import ChatPromptTemplate
                 from config import LLM_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
 
-                vectordb = get_vectorstore(selected_space.id, cat_id)
+                vectordb = get_vectorstore(selected_space.id)
                 retriever = vectordb.as_retriever(search_kwargs={"k": 4})
                 docs = retriever.get_relevant_documents(customer_question)
                 context = "\n\n".join([d.page_content for d in docs])
@@ -360,7 +364,7 @@ elif menu == "💬 对话模拟":
                     del st.session_state['last_sim_question']
                     st.rerun()
 
-        if st.button("清空对话历史"):
+        if st.button("清空对话历史", key="sim_clear"):
             sim_mem.clear()
             st.session_state.pop('last_sim_answer', None)
             st.session_state.pop('last_sim_question', None)
@@ -469,7 +473,6 @@ elif menu == "📄 合同工具":
                 del st.session_state['contract_full_text']
                 st.rerun()
 
-    # ===== 风险审查（修改后） =====
     with sub_tab2:
         st.subheader("合同风险审查")
         contracts = get_all_contracts()

@@ -6,15 +6,12 @@ import os
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
 
-def _collection_name(space_id, category_id=None):
-    """为每个空间-类别生成独立的集合名称"""
-    base = f"space_{space_id}"
-    if category_id:
-        base += f"_cat_{category_id}"
-    return base
+def _collection_name(space_id):
+    # 所有文档存入同一个集合，按空间隔离，不再按类别拆分
+    return f"space_{space_id}"
 
-def get_vectorstore(space_id, category_id=None):
-    collection = _collection_name(space_id, category_id)
+def get_vectorstore(space_id):
+    collection = _collection_name(space_id)
     embeddings = get_embeddings()
     vectordb = Chroma(
         collection_name=collection,
@@ -24,12 +21,16 @@ def get_vectorstore(space_id, category_id=None):
     return vectordb
 
 def add_documents_to_store(space_id, category_id, documents):
-    vectordb = get_vectorstore(space_id, category_id)
+    # 将类别ID写入每个chunk的metadata，用于后续过滤
+    for doc in documents:
+        doc.metadata["category_id"] = category_id if category_id is not None else 0
+    vectordb = get_vectorstore(space_id)
     vectordb.add_documents(documents)
     vectordb.persist()
 
-def delete_from_store(space_id, category_id, source_filename):
-    vectordb = get_vectorstore(space_id, category_id)
+def delete_from_store(space_id, source_filename):
+    # 根据文件名删除文档，不依赖类别
+    vectordb = get_vectorstore(space_id)
     results = vectordb.get(where={"source": source_filename})
     ids = results['ids']
     if ids:

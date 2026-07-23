@@ -1,3 +1,4 @@
+# analytics/viz.py
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -11,7 +12,7 @@ def load_contracts_df():
     for c in contracts:
         data.append({
             "ID": c.id,
-            "文件名": c.filename,
+            "文件名": c.project_name or "未命名",   # 修复：使用项目名称代替不存在的 filename
             "甲方": c.party_a,
             "乙方": c.party_b,
             "金额": c.contract_amount,

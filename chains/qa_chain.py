@@ -25,12 +25,33 @@ def load_history(space_id):
         return history.messages
     return []
 
-def background_generate(question, space_id, category_id, memory, output_state):
+def background_generate(question, space_ids, memory, output_state):
+    """
+    space_ids: 一个列表，包含需要检索的空间ID。若为空或None，则检索当前空间。
+    """
     try:
-        vectordb = get_vectorstore(space_id, category_id)
-        retriever = vectordb.as_retriever(search_kwargs={"k": 4})
-        docs = retriever.get_relevant_documents(question)
-        context = "\n\n".join([d.page_content for d in docs])
+        if not space_ids:
+            space_ids = [None]  # 兼容，但实际上不会传入None
+
+        all_docs = []
+        # 遍历每个空间，检索文档
+        for sid in space_ids:
+            vectordb = get_vectorstore(sid)
+            retriever = vectordb.as_retriever(search_kwargs={"k": 4})
+            docs = retriever.get_relevant_documents(question)
+            all_docs.extend(docs)
+
+        # 按相似度取前4条（若需要更精确的排序，可改用Chroma的相似度分数，此处简单合并）
+        # 限制数量避免token超限
+        unique_docs = []
+        seen = set()
+        for d in all_docs:
+            if d.page_content not in seen:
+                seen.add(d.page_content)
+                unique_docs.append(d)
+        unique_docs = unique_docs[:4]
+
+        context = "\n\n".join([d.page_content for d in unique_docs])
 
         history_msgs = memory.chat_memory.messages
         prompt = ChatPromptTemplate.from_messages([
