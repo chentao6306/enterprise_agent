@@ -11,7 +11,7 @@ from db.repository import (
     get_files_by_space, get_file_record, get_all_tags,
     save_contract, get_all_contracts, get_contract_by_id,
     save_sim_history, search_sim_histories, get_frequent_questions,
-    update_contract_risk_report
+    update_contract_risk_report, get_tags_by_space
 )
 from chains.qa_chain import background_generate
 from chains.extraction_chain import extract_contract_info
@@ -75,7 +75,7 @@ menu = st.sidebar.radio(
     ["📁 知识库", "💬 智能问答", "💬 对话模拟", "📄 合同工具", "📊 数据分析", "⚙️ 管理"]
 )
 
-# ================== 知识库页面（不变） ==================
+# ================== 知识库页面 ==================
 if menu == "📁 知识库":
     st.header("📁 知识库浏览")
     if not selected_space:
@@ -111,8 +111,8 @@ if menu == "📁 知识库":
 
     with col2:
         st.subheader("筛选与搜索")
-        all_tags = get_all_tags()
-        tag_filter_options = ["全部"] + [t.name for t in all_tags]
+        space_tags = get_tags_by_space(selected_space.id)
+        tag_filter_options = ["全部"] + space_tags
         selected_filter_tag = st.selectbox("按标签筛选", tag_filter_options)
 
     files = get_files_by_space(selected_space.id)
@@ -162,7 +162,7 @@ if menu == "📁 知识库":
                     del st.session_state['view_file_id']
                     st.rerun()
 
-# ================== 智能问答（已支持跨空间） ==================
+# ================== 智能问答（新增风格选择） ==================
 elif menu == "💬 智能问答":
     st.header("💬 知识问答")
     if not selected_space:
@@ -180,6 +180,11 @@ elif menu == "💬 智能问答":
     )
     scope_value = space_options[selected_scope_label]
 
+    # 回答风格选择
+    style_options = {"专业严谨（默认）": "default", "朋友聊聊天（江湖气）": "friend"}
+    selected_style_label = st.selectbox("AI 回答风格", list(style_options.keys()), key="qa_style")
+    selected_style = style_options[selected_style_label]
+
     if scope_value == "all":
         search_space_ids = [s.id for s in all_spaces]
         scope_key = "scope_all"
@@ -187,6 +192,7 @@ elif menu == "💬 智能问答":
         search_space_ids = [scope_value]
         scope_key = f"scope_space_{scope_value}"
 
+    # 记忆隔离（按搜索范围 + 风格键，这样不同风格的同一范围对话记忆也独立？这里为简化，只按搜索范围隔离，风格切换不换记忆，保证上下文连贯）
     if "qa_memories" not in st.session_state:
         st.session_state.qa_memories = {}
     if scope_key not in st.session_state.qa_memories:
@@ -203,12 +209,14 @@ elif menu == "💬 智能问答":
         st.session_state.qa_memories[scope_key] = memory
     qa_mem = st.session_state.qa_memories[scope_key]
 
+    # 显示历史
     for msg in qa_mem.chat_memory.messages:
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         elif msg.type == "ai":
             st.chat_message("assistant").write(msg.content)
 
+    # 任务隔离
     if "task_scope" not in st.session_state:
         st.session_state.task_scope = None
     if st.session_state.task_scope != scope_key:
@@ -232,7 +240,7 @@ elif menu == "💬 智能问答":
             state = {"tokens": "", "done": False}
             thread = threading.Thread(
                 target=background_generate,
-                args=(user_question, search_space_ids, qa_mem, state)
+                args=(user_question, search_space_ids, qa_mem, state, selected_style)
             )
             thread.start()
             st.session_state.task = {
@@ -248,7 +256,7 @@ elif menu == "💬 智能问答":
         st.session_state.task = None
         st.rerun()
 
-# ================== 对话模拟（修复 Prompt 杜绝编造） ==================
+# ================== 对话模拟（不变） ==================
 elif menu == "💬 对话模拟":
     st.header("💬 用户对话模拟")
     if not selected_space:
@@ -318,7 +326,6 @@ elif menu == "💬 对话模拟":
                 unique_docs = unique_docs[:4]
                 context = "\n\n".join([d.page_content for d in unique_docs])
 
-                # === 修复后的 Prompt，强制基于文档且禁止编造 ===
                 prompt = ChatPromptTemplate.from_messages([
                     ("system", """你是一位专业、严谨的企业顾问。你必须**严格、仅、完全**根据下面提供的【背景知识库】回答客户问题。
 

@@ -77,6 +77,17 @@ def get_all_tags():
     with SessionLocal() as db:
         return db.query(Tag).all()
 
+@retry_on_lock
+def get_tags_by_space(space_id):
+    """获取指定空间下所有文件关联的标签名称列表"""
+    with SessionLocal() as db:
+        files = db.query(FileRecord).options(joinedload(FileRecord.tags)).filter(FileRecord.space_id == space_id).all()
+        tags = set()
+        for f in files:
+            for t in f.tags:
+                tags.add(t.name)
+        return sorted(list(tags))
+
 # --- 文件记录 ---
 @retry_on_lock
 def create_file_record(space_id, title, filename, category_id=None, description="", tags=[]):
@@ -143,7 +154,6 @@ def save_contract(contract_data):
 
 @retry_on_lock
 def update_contract_risk_report(contract_id, report):
-    """更新合同的风险报告"""
     with SessionLocal() as db:
         contract = db.query(Contract).get(contract_id)
         if contract:
