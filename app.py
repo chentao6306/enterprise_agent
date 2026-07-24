@@ -94,20 +94,23 @@ if menu == "📁 知识库":
                 manual_tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
 
             if st.button("确认上传"):
-                with st.spinner("上传并分析中..."):
-                    file_bytes = uploaded_file.getvalue()
-                    file_record = upload_document(
-                        space_id=selected_space.id,
-                        file_bytes=file_bytes,
-                        filename=uploaded_file.name,
-                        title=title,
-                        description=description,
-                        category_id=None,
-                        tags=manual_tags,
-                        auto_suggest=False
-                    )
-                st.success(f"文档 '{file_record.title}' 上传成功！")
-                st.rerun()
+                try:
+                    with st.spinner("上传并分析中..."):
+                        file_bytes = uploaded_file.getvalue()
+                        file_record = upload_document(
+                            space_id=selected_space.id,
+                            file_bytes=file_bytes,
+                            filename=uploaded_file.name,
+                            title=title,
+                            description=description,
+                            category_id=None,
+                            tags=manual_tags,
+                            auto_suggest=True
+                        )
+                    st.success(f"文档 '{file_record.title}' 上传成功！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"上传失败：{e}")
 
     with col2:
         st.subheader("筛选与搜索")
@@ -162,7 +165,7 @@ if menu == "📁 知识库":
                     del st.session_state['view_file_id']
                     st.rerun()
 
-# ================== 智能问答（新增风格选择） ==================
+# ================== 智能问答 ==================
 elif menu == "💬 智能问答":
     st.header("💬 知识问答")
     if not selected_space:
@@ -180,7 +183,6 @@ elif menu == "💬 智能问答":
     )
     scope_value = space_options[selected_scope_label]
 
-    # 回答风格选择
     style_options = {"专业严谨（默认）": "default", "朋友聊聊天（江湖气）": "friend"}
     selected_style_label = st.selectbox("AI 回答风格", list(style_options.keys()), key="qa_style")
     selected_style = style_options[selected_style_label]
@@ -192,7 +194,6 @@ elif menu == "💬 智能问答":
         search_space_ids = [scope_value]
         scope_key = f"scope_space_{scope_value}"
 
-    # 记忆隔离（按搜索范围 + 风格键，这样不同风格的同一范围对话记忆也独立？这里为简化，只按搜索范围隔离，风格切换不换记忆，保证上下文连贯）
     if "qa_memories" not in st.session_state:
         st.session_state.qa_memories = {}
     if scope_key not in st.session_state.qa_memories:
@@ -209,14 +210,12 @@ elif menu == "💬 智能问答":
         st.session_state.qa_memories[scope_key] = memory
     qa_mem = st.session_state.qa_memories[scope_key]
 
-    # 显示历史
     for msg in qa_mem.chat_memory.messages:
         if msg.type == "human":
             st.chat_message("user").write(msg.content)
         elif msg.type == "ai":
             st.chat_message("assistant").write(msg.content)
 
-    # 任务隔离
     if "task_scope" not in st.session_state:
         st.session_state.task_scope = None
     if st.session_state.task_scope != scope_key:
@@ -256,7 +255,7 @@ elif menu == "💬 智能问答":
         st.session_state.task = None
         st.rerun()
 
-# ================== 对话模拟（不变） ==================
+# ================== 对话模拟 ==================
 elif menu == "💬 对话模拟":
     st.header("💬 用户对话模拟")
     if not selected_space:
@@ -301,15 +300,28 @@ elif menu == "💬 对话模拟":
         st.subheader("输入客户问题，生成真人化回答")
         st.caption(f"当前搜索范围：{selected_scope_label_sim}")
 
+        sim_style_options = {"安抚型（先安抚情绪）": "comfort", "直接型（简洁解决问题）": "direct"}
+        sim_style_label = st.selectbox("回答风格", list(sim_style_options.keys()), key="sim_style")
+        sim_style = sim_style_options[sim_style_label]
+
         with st.form("sim_form", clear_on_submit=True):
             customer_question = st.text_area("客户问题", height=100, key="sim_input")
             submitted = st.form_submit_button("生成回答")
 
         if submitted and customer_question:
-            with st.spinner("正在生成回答..."):
+            with st.spinner("正在分析情绪并生成回答..."):
                 from langchain.chat_models import ChatOpenAI
                 from langchain.prompts import ChatPromptTemplate
                 from config import LLM_MODEL, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL
+
+                emotion_prompt = ChatPromptTemplate.from_messages([
+                    ("system", "你是一位专业的客户情绪分析专家。请分析下面客户消息的情绪，并用简短中文描述（如：平静、烦躁、愤怒、焦虑、疑惑、满意等），然后给出简短的建议，格式为：情绪：xxx，建议：xxx"),
+                    ("human", "{question}")
+                ])
+                emotion_llm = ChatOpenAI(model=LLM_MODEL, openai_api_key=DEEPSEEK_API_KEY, openai_api_base=DEEPSEEK_BASE_URL, temperature=0)
+                emotion_response = emotion_llm(emotion_prompt.format_prompt(question=customer_question).to_messages())
+                emotion_text = emotion_response.content.strip()
+                st.session_state['last_emotion'] = emotion_text
 
                 all_docs = []
                 for sid in sim_search_ids:
@@ -326,24 +338,31 @@ elif menu == "💬 对话模拟":
                 unique_docs = unique_docs[:4]
                 context = "\n\n".join([d.page_content for d in unique_docs])
 
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", """你是一位专业、严谨的企业顾问。你必须**严格、仅、完全**根据下面提供的【背景知识库】回答客户问题。
+                if sim_style == "comfort":
+                    style_instruction = "你是一位善于共情的客服专家。请先真诚地安抚客户情绪（如表达理解、感谢反馈等），再基于知识库提供解决方案。语气要温暖、体贴。"
+                else:
+                    style_instruction = "你是一位高效直接的客服专家。请简洁明了地解答客户问题，开门见山，不要过多寒暄。但依然要礼貌。"
 
-**重要规则（违反将导致系统不可用）：**
-1. 如果背景知识库中**没有**任何内容能直接或间接回答客户问题，你必须说：“抱歉，目前的知识库中未包含该信息，我无法为您提供答案，建议联系相关同事。”
-2. 如果背景知识库中**只有部分信息**，你可以基于这些信息谨慎回答，但**绝不能**添加任何知识库中没有的细节、产品名、服务描述、价格等。
-3. 你的回答必须像真人沟通，语气温和专业，但**所有事实性内容必须来自背景知识库**。
-4. 绝对禁止编造任何信息，即使你认为那是常识。如果知识库未提及，那就是不存在。
-5. 如果客户的问题非常模糊（例如“你们公司做什么的”），而知识库中没有公司简介，你必须如实告知。
+                main_prompt = ChatPromptTemplate.from_messages([
+                    ("system", f"""你是一个专业的企业顾问。你必须严格根据下面提供的【背景知识库】回答客户问题。
+
+{style_instruction}
+
+**重要规则：**
+1. 只使用背景知识库中的信息，不能编造。
+2. 如果知识库没有答案，请诚实说明。
+3. 所有事实性内容必须来自知识库。
+
+客户情绪分析：{emotion_text}
 
 背景知识库：
-{context}"""),
+{{context}}"""),
                     *sim_mem.chat_memory.messages,
                     ("human", "{question}")
                 ])
 
                 llm = ChatOpenAI(model=LLM_MODEL, openai_api_key=DEEPSEEK_API_KEY, openai_api_base=DEEPSEEK_BASE_URL, temperature=0.3)
-                response = llm(prompt.format_prompt(context=context, question=customer_question).to_messages())
+                response = llm(main_prompt.format_prompt(context=context, question=customer_question).to_messages())
                 answer = response.content
 
                 sim_mem.chat_memory.add_user_message(customer_question)
@@ -354,6 +373,8 @@ elif menu == "💬 对话模拟":
                 st.session_state['last_sim_answer'] = answer
                 st.session_state['last_sim_question'] = customer_question
 
+        if 'last_emotion' in st.session_state:
+            st.info(f"客户情绪分析：{st.session_state['last_emotion']}")
         if 'last_sim_answer' in st.session_state and 'last_sim_question' in st.session_state:
             st.subheader("AI 生成回答")
             st.write(st.session_state['last_sim_answer'])
@@ -373,6 +394,7 @@ elif menu == "💬 对话模拟":
                     st.success("感谢反馈！已记录为满意。")
                     del st.session_state['last_sim_answer']
                     del st.session_state['last_sim_question']
+                    del st.session_state['last_emotion']
                     st.rerun()
             with col_rate2:
                 if st.button("👎 不满意", key="unsatisfied"):
@@ -388,12 +410,14 @@ elif menu == "💬 对话模拟":
                     st.success("感谢反馈！已记录为不满意，我们将优化知识库。")
                     del st.session_state['last_sim_answer']
                     del st.session_state['last_sim_question']
+                    del st.session_state['last_emotion']
                     st.rerun()
 
         if st.button("清空对话历史", key="sim_clear"):
             sim_mem.clear()
             st.session_state.pop('last_sim_answer', None)
             st.session_state.pop('last_sim_question', None)
+            st.session_state.pop('last_emotion', None)
             st.rerun()
 
     with tab2:
@@ -421,7 +445,7 @@ elif menu == "💬 对话模拟":
         else:
             st.info("暂无模拟对话记录。")
 
-# ================== 合同工具（不变） ==================
+# ================== 合同工具 ==================
 elif menu == "📄 合同工具":
     st.header("📄 合同工具")
     if not selected_space:

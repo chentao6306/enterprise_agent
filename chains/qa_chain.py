@@ -26,10 +26,6 @@ def load_history(space_id):
     return []
 
 def background_generate(question, space_ids, memory, output_state, style="default"):
-    """支持回答风格：
-    - default: 专业严谨
-    - friend: 朋友聊天，轻松江湖气
-    """
     try:
         if not space_ids:
             space_ids = []
@@ -41,7 +37,6 @@ def background_generate(question, space_ids, memory, output_state, style="defaul
             docs = retriever.get_relevant_documents(question)
             all_docs.extend(docs)
 
-        # 去重并限制数量
         seen = set()
         unique_docs = []
         for d in all_docs:
@@ -51,7 +46,7 @@ def background_generate(question, space_ids, memory, output_state, style="defaul
         unique_docs = unique_docs[:4]
         context = "\n\n".join([d.page_content for d in unique_docs])
 
-        # 根据风格选择不同的System Prompt
+        # 朋友风格：恢复为轻松江湖气
         if style == "friend":
             system_prompt = (
                 "你是一个知识渊博又随性的朋友，说话带着江湖气和人情味，像在深夜烧烤摊上聊人生。"
@@ -59,11 +54,13 @@ def background_generate(question, space_ids, memory, output_state, style="defaul
                 "如果文档里没有答案，就直接告诉朋友：“这事儿文档里没写，要不咱问下知情的同事？”"
                 "\n\n参考文档：\n{context}"
             )
-        else:  # default
+            temperature = 0.3
+        else:
             system_prompt = (
                 "你是企业的智能助手，根据提供的知识库文档严谨、准确地回答。"
                 "\n\n参考文档：\n{context}"
             )
+            temperature = 0
 
         history_msgs = memory.chat_memory.messages
         prompt = ChatPromptTemplate.from_messages([
@@ -75,7 +72,7 @@ def background_generate(question, space_ids, memory, output_state, style="defaul
             model=LLM_MODEL,
             openai_api_key=DEEPSEEK_API_KEY,
             openai_api_base=DEEPSEEK_BASE_URL,
-            temperature=0.3 if style == "friend" else 0,  # 朋友风格稍微提高创意度
+            temperature=temperature,
             streaming=True
         )
 

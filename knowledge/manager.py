@@ -12,6 +12,10 @@ from config import UPLOAD_DIR
 def upload_document(space_id, file_bytes, filename, title=None, description="", category_id=None, tags=None, auto_suggest=True):
     if tags is None:
         tags = []
+    # 检查文件是否为空
+    if file_bytes is None or len(file_bytes) == 0:
+        raise ValueError("文件内容为空，无法上传。")
+
     # 保存原始文件
     file_path = os.path.join(UPLOAD_DIR, f"space{space_id}_{filename}")
     with open(file_path, "wb") as f:
@@ -19,6 +23,9 @@ def upload_document(space_id, file_bytes, filename, title=None, description="", 
 
     # 加载文本
     chunks = load_and_split_bytes(file_bytes, filename)
+    if not chunks:
+        raise ValueError("无法从文件中提取文本，可能文件损坏或不支持的内容。")
+
     full_text = " ".join([c.page_content for c in chunks])
 
     # 自动推荐类别和标签
@@ -30,20 +37,14 @@ def upload_document(space_id, file_bytes, filename, title=None, description="", 
         if sug_tags:
             tags = list(set(tags + sug_tags))
 
-    # 清洗标签
     tags = list(set(t.strip() for t in tags if t.strip()))
 
-    # 生成标题
     if not title:
         title = os.path.splitext(filename)[0]
 
-    # 创建文件记录
     file_record = create_file_record(space_id, title, filename, category_id, description, tags)
-
-    # 添加版本1
     add_file_version(file_record.id, 1, file_path, len(chunks))
 
-    # 索引到向量库（统一集合，category_id 存入 metadata 用于过滤）
     for chunk in chunks:
         chunk.metadata["source"] = filename
         chunk.metadata["file_id"] = file_record.id
@@ -63,6 +64,9 @@ def upload_new_version(file_id, file_bytes, filename):
         f.write(file_bytes)
 
     chunks = load_and_split_bytes(file_bytes, filename)
+    if not chunks:
+        raise ValueError("无法从文件中提取文本，版本更新失败。")
+
     add_file_version(file_id, new_version, file_path, len(chunks))
 
     for chunk in chunks:
@@ -77,7 +81,5 @@ def delete_document(file_id):
     rec = get_file_record(file_id)
     if not rec:
         return
-    # 根据 source 文件名从向量库删除
     delete_from_store(rec.space_id, rec.original_filename)
-    # 删除数据库记录
     delete_file_record(file_id)
